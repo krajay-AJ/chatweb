@@ -1,0 +1,49 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                        Int                         @id @default(autoincrement())
+  email                     String                      @unique @db.VarChar(255)
+  username                  String                      @unique @db.VarChar(50)
+  password                  String                      @db.VarChar(255)
+  gender                    String                      @db.VarChar(20)
+  is_verified               Boolean?                    @default(false)
+  created_at                DateTime?                   @default(now()) @db.Timestamp(6)
+  updated_at                DateTime?                   @default(now()) @db.Timestamp(6)
+  last_login                DateTime?                   @db.Timestamp(6)
+  conversation_participants conversation_participants[]
+
+  @@index([email], map: "idx_users_email")
+  @@index([username], map: "idx_users_username")
+  @@map("users")
+}
+
+model Conversation {
+  id                        Int                         @id @default(autoincrement())
+  type                      String                      @db.VarChar(20)
+  created_at                DateTime?                   @default(now()) @db.Timestamp(6)
+  updated_at                DateTime?                   @default(now()) @db.Timestamp(6)
+  conversation_participants conversation_participants[]
+
+  @@map("conversations")
+}
+
+model conversation_participants {
+  id              Int           @id @default(autoincrement())
+  conversation_id Int?
+  user_id         Int?
+  joined_at       DateTime?     @default(now()) @db.Timestamp(6)
+  left_at         DateTime?     @db.Timestamp(6)
+  conversations   Conversation? @relation(fields: [conversation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users           User?         @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([conversation_id, user_id])
+  @@index([conversation_id], map: "idx_conversation_participants_conversation_id")
+  @@index([user_id], map: "idx_conversation_participants_user_id")
+}
