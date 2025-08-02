@@ -17,10 +17,13 @@ import {
   Avatar,
   IconButton,
   Badge,
+  CircularProgress,
 } from '@mui/material';
-import { Send as SendIcon, Person as PersonIcon, Logout as LogoutIcon, Search as SearchIcon } from '@mui/icons-material';
+import { Send as SendIcon, Person as PersonIcon, Logout as LogoutIcon, Search as SearchIcon, Phone as PhoneIcon, PhoneDisabled, Mic, MicOff, CallEnd, CallReceived, SignalCellularConnectedNoInternet0Bar, Lock } from '@mui/icons-material';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { Dialog, DialogTitle, DialogContent, DialogActions, Alert } from '@mui/material';
 import io, { Socket } from 'socket.io-client';
+import Peer from 'simple-peer/simplepeer.min.js';
 
 interface Message {
   id: string;
@@ -54,6 +57,23 @@ function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
 
+  // Enhanced voice call state
+  const [isCallActive, setIsCallActive] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [callError, setCallError] = useState<string | null>(null);
+  const [peer, setPeer] = useState<any | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+
+  // New enhanced call features
+  const [callState, setCallState] = useState<'idle' | 'calling' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle');
+  const [callDuration, setCallDuration] = useState(0);
+  const [callStartTime, setCallStartTime] = useState<Date | null>(null);
+  const [audioQuality, setAudioQuality] = useState<'good' | 'poor' | 'unknown'>('unknown');
+  const [isEncrypted, setIsEncrypted] = useState(false);
+  const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const MAX_RECONNECT_ATTEMPTS = 3;
+
   // Check for existing session on app start
   useEffect(() => {
     const token = localStorage.getItem('authToken');
@@ -71,14 +91,35 @@ function App() {
     }
   }, []);
 
+  // Call duration timer
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (callState === 'connected' && callStartTime) {
+      interval = setInterval(() => {
+        setCallDuration(Math.floor((Date.now() - callStartTime.getTime()) / 1000));
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [callState, callStartTime]);
+
+  // Format call duration
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   useEffect(() => {
     if (!user) return;
     // Generate a userId based on username for demo (in real app, use backend id)
     const generatedUserId = user.username + '-' + Math.random().toString(36).substr(2, 6);
     setUserId(generatedUserId);
 
-    // Connect to Socket.IO server
-    const socketUrl = 'http://localhost:3001';
+    // Debug: Check if we're using the browser version of simple-peer
+    console.log('🔧 Debug: Simple-peer WEBRTC_SUPPORT:', (Peer as any).WEBRTC_SUPPORT);
+
+    // Connect to Socket.IO server - configurable for different environments
+    const socketUrl = process.env.REACT_APP_SOCKET_URL || 'http://localhost:3001';
 
     console.log('🔧 Debug: Current hostname:', window.location.hostname);
     console.log('🔧 Debug: Socket URL:', socketUrl);
@@ -184,11 +225,191 @@ function App() {
       }]);
     });
 
+    // Voice call event listeners
+    newSocket.on('voice_call_initiate', (data) => {
+      setIncomingCallFrom(data.from);
+      setCallState('ringing');
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: `📞 Incoming call from ${data.from}...`,
+        senderId: 'system',
+        timestamp: new Date().toISOString(),
+        type: 'system'
+      }]);
+    });
+
+    newSocket.on('voice_call_accepted', () => {
+      setCallState('connecting');
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: '✅ Call accepted. Connecting...',
+        senderId: 'system',
+        timestamp: new Date().toISOString(),
+        type: 'system'
+      }]);
+    });
+
+    newSocket.on('voice_call_rejected', () => {
+      setCallState('idle');
+      setCallError('Call was rejected');
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: '❌ Call was rejected',
+        senderId: 'system',
+        timestamp: new Date().toISOString(),
+        type: 'system'
+      }]);
+      endVoiceCall();
+    });
+
+    // Robust WebRTC signaling handler
+    newSocket.on('voice_call_signal', async (data) => {
+      // Defensive: Only handle if we have a connected user
+      if (!connectedUser && !incomingCallFrom) return;
+
+      // If peer already exists, just signal it
+      if (peer) {
+        try {
+          peer.signal(data.signal);
+        } catch (err) {
+          console.error('Peer.signal error:', err);
+        }
+        return;
+      }
+
+      // If no peer exists, this is the callee receiving the first signal
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+        setLocalStream(stream);
+
+        const newPeer = new Peer({
+          initiator: false,
+          trickle: false,
+          stream,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+            ]
+          }
+        });
+
+        newPeer.on('signal', (signalData) => {
+          newSocket.emit('voice_call_signal', {
+            signal: signalData,
+            to: data.from
+          });
+        });
+
+        newPeer.on('connect', () => {
+          setCallState('connected');
+          setCallStartTime(new Date());
+          setIsEncrypted(true);
+          setIsCallActive(true);
+          // Monitor audio quality (simplified)
+          const qualityInterval = setInterval(() => {
+            setAudioQuality('good');
+          }, 5000);
+          newPeer.on('close', () => clearInterval(qualityInterval));
+        });
+
+        newPeer.on('stream', (remoteStream) => {
+          const audio = new Audio();
+          audio.srcObject = remoteStream;
+          audio.play().catch(console.error);
+        });
+
+        newPeer.on('error', (error) => {
+          console.error('Peer connection error:', error);
+          setCallError(`Connection failed: ${error.message}`);
+          endVoiceCall();
+        });
+
+        // Signal with the offer from initiator
+        newPeer.signal(data.signal);
+        setPeer(newPeer);
+      } catch (error) {
+        console.error('Failed to accept call:', error);
+        setCallError('Microphone access denied or signaling error');
+        endVoiceCall();
+      }
+    });
+
+    newSocket.on('voice_call_end', () => {
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: 'Voice call ended.',
+        senderId: 'system',
+        timestamp: new Date().toISOString(),
+        type: 'system'
+      }]);
+      endVoiceCall();
+    });
+
     setSocket(newSocket);
     return () => {
       newSocket.close();
     };
   }, [user]);
+
+  // Accept incoming call
+  const acceptCall = async () => {
+    if (!socket || !incomingCallFrom) return;
+
+    try {
+      setCallError(null);
+      socket.emit('voice_call_accept', { to: incomingCallFrom });
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      setLocalStream(stream);
+      setIncomingCallFrom(null);
+      setCallState('connecting');
+
+    } catch (error) {
+      setCallError('Microphone access denied');
+      rejectCall();
+    }
+  };
+
+  // Reject incoming call
+  const rejectCall = () => {
+    if (socket && incomingCallFrom) {
+      socket.emit('voice_call_reject', { to: incomingCallFrom });
+    }
+    setIncomingCallFrom(null);
+    setCallState('idle');
+    setCallError(null);
+  };
+
+  // Handle reconnection
+  const handleReconnection = async () => {
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      setReconnectAttempts(prev => prev + 1);
+      setCallError(`Reconnecting... (${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+      try {
+        await startVoiceCall();
+        setReconnectAttempts(0);
+      } catch (error) {
+        setTimeout(handleReconnection, 2000);
+      }
+    } else {
+      setCallError('Unable to reconnect. Please try calling again.');
+      endVoiceCall();
+    }
+  };
 
   const handleLogout = () => {
     // Clear user data and tokens
@@ -272,6 +493,125 @@ function App() {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       sendMessage();
+    }
+  };
+
+  // Enhanced voice call functions with WebRTC
+  const startVoiceCall = async () => {
+    if (!connectedUser || !socket) {
+      setCallError('No user connected');
+      return;
+    }
+
+    try {
+      setCallError(null);
+      setCallState('calling');
+      setReconnectAttempts(0);
+
+      // Get user media
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      setLocalStream(stream);
+
+      // Create peer connection
+      const newPeer = new Peer({
+        initiator: true,
+        trickle: false,
+        stream,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+          ]
+        }
+      });
+
+      newPeer.on('signal', (signalData) => {
+        socket.emit('voice_call_signal', {
+          signal: signalData,
+          to: connectedUser
+        });
+      });
+
+      newPeer.on('connect', () => {
+        setCallState('connected');
+        setCallStartTime(new Date());
+        setIsEncrypted(true);
+        setIsCallActive(true);
+      });
+
+      newPeer.on('stream', (remoteStream) => {
+        // Play remote audio
+        const audio = new Audio();
+        audio.srcObject = remoteStream;
+        audio.play().catch(console.error);
+      });
+
+      newPeer.on('error', (error) => {
+        console.error('Peer error:', error);
+        setCallError('Connection failed');
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          handleReconnection();
+        } else {
+          endVoiceCall();
+        }
+      });
+
+      newPeer.on('close', () => {
+        endVoiceCall();
+      });
+
+      setPeer(newPeer);
+
+      // Notify the other user
+      socket.emit('voice_call_initiate', { to: connectedUser });
+
+    } catch (error) {
+      setCallError('Microphone access denied');
+      setCallState('idle');
+      console.error('Voice call error:', error);
+    }
+  };
+
+  const endVoiceCall = () => {
+    if (peer) {
+      peer.destroy();
+      setPeer(null);
+    }
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      setLocalStream(null);
+    }
+
+    setIsCallActive(false);
+    setIsMuted(false);
+    setCallError(null);
+    setCallState('idle');
+    setCallDuration(0);
+    setCallStartTime(null);
+    setAudioQuality('unknown');
+    setIsEncrypted(false);
+    setIncomingCallFrom(null);
+    setReconnectAttempts(0);
+
+    if (socket && connectedUser) {
+      socket.emit('voice_call_end', { to: connectedUser });
+    }
+  };
+
+  const toggleMute = () => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsMuted(!isMuted);
     }
   };
 
@@ -454,6 +794,140 @@ function App() {
               <Typography variant="body2" color="success.main">
                 Connected with: {connectedUser}
               </Typography>
+            </Box>
+          )}
+
+          {/* Incoming Call Dialog */}
+          <Dialog open={callState === 'ringing'} maxWidth="sm" fullWidth>
+            <DialogTitle sx={{ textAlign: 'center' }}>
+              📞 Incoming Call
+            </DialogTitle>
+            <DialogContent sx={{ textAlign: 'center', py: 3 }}>
+              <Typography variant="h6" gutterBottom>
+                Call from {incomingCallFrom}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Would you like to accept this voice call?
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ justifyContent: 'center', gap: 2, pb: 3 }}>
+              <Button
+                onClick={acceptCall}
+                color="success"
+                variant="contained"
+                startIcon={<CallReceived />}
+                size="large"
+              >
+                Accept
+              </Button>
+              <Button
+                onClick={rejectCall}
+                color="error"
+                variant="outlined"
+                startIcon={<CallEnd />}
+                size="large"
+              >
+                Decline
+              </Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* Enhanced Voice Call UI */}
+          {connectedUser && (
+            <Box sx={{ mt: 2, p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">Voice Call</Typography>
+                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                  {isEncrypted && <Lock color="success" fontSize="small" />}
+                  {audioQuality === 'poor' && <SignalCellularConnectedNoInternet0Bar color="warning" fontSize="small" />}
+                  {callState === 'connected' && (
+                    <Typography variant="caption" color="text.secondary">
+                      {formatDuration(callDuration)}
+                    </Typography>
+                  )}
+                </Box>
+              </Box>
+
+              {callError && (
+                <Alert severity="error" sx={{ mb: 2 }}>
+                  {callError}
+                  {reconnectAttempts > 0 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS && (
+                    <Button size="small" onClick={handleReconnection} sx={{ ml: 1 }}>
+                      Retry ({MAX_RECONNECT_ATTEMPTS - reconnectAttempts} attempts left)
+                    </Button>
+                  )}
+                </Alert>
+              )}
+
+              {callState === 'idle' && (
+                <Button
+                  variant="contained"
+                  startIcon={<PhoneIcon />}
+                  onClick={startVoiceCall}
+                  fullWidth
+                  disabled={!connectedUser}
+                >
+                  Start Voice Call
+                </Button>
+              )}
+
+              {callState === 'calling' && (
+                <Box sx={{ textAlign: 'center' }}>
+                  <CircularProgress sx={{ mb: 2 }} />
+                  <Typography gutterBottom>Calling {connectedUser}...</Typography>
+                  <Button onClick={endVoiceCall} color="error" variant="outlined">
+                    Cancel
+                  </Button>
+                </Box>
+              )}
+
+              {callState === 'connecting' && (
+                <Box sx={{ textAlign: 'center' }}>
+                  <CircularProgress sx={{ mb: 2 }} />
+                  <Typography>Connecting...</Typography>
+                </Box>
+              )}
+
+              {callState === 'connected' && (
+                <>
+                  <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+                    <Button
+                      variant="outlined"
+                      startIcon={isMuted ? <MicOff /> : <Mic />}
+                      onClick={toggleMute}
+                      color={isMuted ? "error" : "primary"}
+                    >
+                      {isMuted ? 'Unmute' : 'Mute'}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      color="error"
+                      startIcon={<PhoneDisabled />}
+                      onClick={endVoiceCall}
+                      fullWidth
+                    >
+                      End Call
+                    </Button>
+                  </Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="body2" color="success.main">
+                      📞 Connected with {connectedUser}
+                    </Typography>
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      {isEncrypted && (
+                        <Typography variant="caption" color="success.main">
+                          🔒 Encrypted
+                        </Typography>
+                      )}
+                      {audioQuality === 'poor' && (
+                        <Typography variant="caption" color="warning.main">
+                          ⚠️ Poor Quality
+                        </Typography>
+                      )}
+                    </Box>
+                  </Box>
+                </>
+              )}
             </Box>
           )}
         </Container>
