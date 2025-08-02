@@ -18,19 +18,23 @@ import {
   IconButton,
   Badge,
   CircularProgress,
+  Chip,
+  Tabs,
+  Tab,
 } from '@mui/material';
-import { Send as SendIcon, Person as PersonIcon, Logout as LogoutIcon, Search as SearchIcon, Phone as PhoneIcon, PhoneDisabled, Mic, MicOff, CallEnd, CallReceived, SignalCellularConnectedNoInternet0Bar, Lock } from '@mui/icons-material';
+import { Send as SendIcon, Person as PersonIcon, Logout as LogoutIcon, Search as SearchIcon, Phone as PhoneIcon, PhoneDisabled, Mic, MicOff, CallEnd, CallReceived, SignalCellularConnectedNoInternet0Bar, Lock, SmartToy as BotIcon } from '@mui/icons-material';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { Dialog, DialogTitle, DialogContent, DialogActions, Alert } from '@mui/material';
 import io, { Socket } from 'socket.io-client';
 import Peer from 'simple-peer/simplepeer.min.js';
+import WhisBot from './services/WhisBot';
 
 interface Message {
   id: string;
   content: string;
   senderId: string;
   timestamp: string;
-  type: 'text' | 'system';
+  type: 'text' | 'system' | 'whisbot';
 }
 
 const theme = createTheme({
@@ -73,6 +77,13 @@ function App() {
   const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const MAX_RECONNECT_ATTEMPTS = 3;
+
+  // WhisBot AI companion state
+  const [whisBot] = useState(new WhisBot());
+  const [isChatWithBot, setIsChatWithBot] = useState(false);
+  const [botTyping, setBotTyping] = useState(false);
+  const [botVibe, setBotVibe] = useState<'friendly' | 'flirty' | 'intellectual' | 'funny'>('friendly');
+  const [chatMode, setChatMode] = useState<'human' | 'bot'>('human');
 
   // Check for existing session on app start
   useEffect(() => {
@@ -455,37 +466,130 @@ function App() {
   };
 
   const sendMessage = () => {
-    if (newMessage.trim() && socket && isConnected && user) {
-      // Check if user is connected to someone
-      if (!connectedUser) {
+    if (newMessage.trim() && user) {
+      if (chatMode === 'bot') {
+        // Chat with WhisBot
+        sendMessageToBot();
+      } else if (socket && isConnected) {
+        // Chat with human
+        sendMessageToHuman();
+      } else {
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
-          content: 'You need to find and connect with another user first. Click the "Find" button below.',
+          content: 'You need to connect to the server first.',
           senderId: 'system',
           timestamp: new Date().toISOString(),
           type: 'system'
         }]);
-        return;
       }
+    }
+  };
 
-      const message: Message = {
+  const sendMessageToBot = async () => {
+    if (!newMessage.trim()) return;
+
+    // Add user message
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      content: newMessage,
+      senderId: user!.username,
+      timestamp: new Date().toISOString(),
+      type: 'text'
+    };
+    setMessages(prev => [...prev, userMessage]);
+
+    const messageContent = newMessage;
+    setNewMessage('');
+
+    // Show bot typing
+    setBotTyping(true);
+
+    try {
+      const botResponse = await whisBot.getBotResponse(messageContent);
+
+      // Add bot message after delay
+      setTimeout(() => {
+        setBotTyping(false);
+        const botMessage: Message = {
+          id: Date.now().toString(),
+          content: botResponse.message,
+          senderId: 'WhisBot',
+          timestamp: new Date().toISOString(),
+          type: 'whisbot'
+        };
+        setMessages(prev => [...prev, botMessage]);
+      }, 1000);
+    } catch (error) {
+      setBotTyping(false);
+      console.error('WhisBot error:', error);
+    }
+  };
+
+  const sendMessageToHuman = () => {
+    if (!connectedUser) {
+      setMessages(prev => [...prev, {
         id: Date.now().toString(),
-        content: newMessage,
-        senderId: user.username,
+        content: 'You need to find and connect with another user first. Click the "Find" button below.',
+        senderId: 'system',
         timestamp: new Date().toISOString(),
-        type: 'text'
-      };
+        type: 'system'
+      }]);
+      return;
+    }
 
-      // Add message to local state immediately
-      setMessages(prev => [...prev, message]);
+    const message: Message = {
+      id: Date.now().toString(),
+      content: newMessage,
+      senderId: user!.username,
+      timestamp: new Date().toISOString(),
+      type: 'text'
+    };
 
-      // Send to server
-      socket.emit('send_message', {
-        content: newMessage,
-        type: 'text'
-      });
+    // Add message to local state immediately
+    setMessages(prev => [...prev, message]);
 
-      setNewMessage('');
+    // Send to server
+    socket!.emit('send_message', {
+      content: newMessage,
+      type: 'text'
+    });
+
+    setNewMessage('');
+  };
+
+  const toggleChatMode = (mode: 'human' | 'bot') => {
+    setChatMode(mode);
+    if (mode === 'bot') {
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: `🤖 WhisBot is here! I'm feeling ${botVibe} today. ${whisBot.getConversationStarter()}`,
+        senderId: 'WhisBot',
+        timestamp: new Date().toISOString(),
+        type: 'whisbot'
+      }]);
+      whisBot.setVibe(botVibe);
+    } else {
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: 'Switched back to human chat. Click "Find" to connect with other users.',
+        senderId: 'system',
+        timestamp: new Date().toISOString(),
+        type: 'system'
+      }]);
+    }
+  };
+
+  const changeBotVibe = (vibe: 'friendly' | 'flirty' | 'intellectual' | 'funny') => {
+    setBotVibe(vibe);
+    whisBot.setVibe(vibe);
+    if (chatMode === 'bot') {
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: `✨ Vibe changed to ${vibe}! ${whisBot.getConversationStarter()}`,
+        senderId: 'WhisBot',
+        timestamp: new Date().toISOString(),
+        type: 'whisbot'
+      }]);
     }
   };
 
@@ -697,6 +801,58 @@ function App() {
         </AppBar>
 
         <Container maxWidth="md" sx={{ flex: 1, display: 'flex', flexDirection: 'column', py: 2 }}>
+          {/* Chat Mode Selector */}
+          <Box sx={{ mb: 2 }}>
+            <Tabs
+              value={chatMode}
+              onChange={(_, newValue) => toggleChatMode(newValue)}
+              variant="fullWidth"
+              sx={{ mb: 1 }}
+            >
+              <Tab
+                label={
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <PersonIcon />
+                    Human Chat
+                    {connectedUser && <Chip label={connectedUser} size="small" color="success" />}
+                  </Box>
+                }
+                value="human"
+              />
+              <Tab
+                label={
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <BotIcon />
+                    WhisBot AI
+                    {botTyping && <CircularProgress size={16} />}
+                  </Box>
+                }
+                value="bot"
+              />
+            </Tabs>
+
+            {/* Bot Vibe Selector */}
+            {chatMode === 'bot' && (
+              <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center', flexWrap: 'wrap' }}>
+                {[
+                  { vibe: 'friendly', label: 'Friendly 🧸', color: 'primary' },
+                  { vibe: 'flirty', label: 'Flirty 😘', color: 'secondary' },
+                  { vibe: 'intellectual', label: 'Smart 🤓', color: 'info' },
+                  { vibe: 'funny', label: 'Funny 🤡', color: 'warning' }
+                ].map(({ vibe, label, color }) => (
+                  <Chip
+                    key={vibe}
+                    label={label}
+                    variant={botVibe === vibe ? 'filled' : 'outlined'}
+                    color={color as any}
+                    size="small"
+                    onClick={() => changeBotVibe(vibe as any)}
+                    sx={{ cursor: 'pointer' }}
+                  />
+                ))}
+              </Box>
+            )}
+          </Box>
           <Paper
             elevation={3}
             sx={{
@@ -711,15 +867,27 @@ function App() {
               <List>
                 {messages.map((message) => (
                   <ListItem key={message.id} alignItems="flex-start">
-                    <Avatar sx={{ mr: 2, bgcolor: message.type === 'system' ? 'grey.500' : 'primary.main' }}>
-                      {message.type === 'system' ? '🤖' : message.senderId === userId ? 'You' : 'User'}
+                    <Avatar sx={{
+                      mr: 2,
+                      bgcolor: message.type === 'system' ? 'grey.500' :
+                        message.type === 'whisbot' ? 'secondary.main' :
+                          'primary.main'
+                    }}>
+                      {message.type === 'system' ? '🤖' :
+                        message.type === 'whisbot' ? '✨' :
+                          message.senderId === userId ? 'You' : 'User'}
                     </Avatar>
                     <ListItemText
                       primary={
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                           <Typography variant="subtitle2" component="span">
-                            {message.type === 'system' ? 'System' : message.senderId === userId ? 'You' : 'Anonymous User'}
+                            {message.type === 'system' ? 'System' :
+                              message.type === 'whisbot' ? 'WhisBot' :
+                                message.senderId === userId ? 'You' : 'Anonymous User'}
                           </Typography>
+                          {message.type === 'whisbot' && (
+                            <Chip label={botVibe} size="small" color="secondary" />
+                          )}
                           <Typography variant="caption" color="text.secondary">
                             {new Date(message.timestamp).toLocaleTimeString()}
                           </Typography>
@@ -729,7 +897,10 @@ function App() {
                         <Typography
                           variant="body1"
                           color={message.type === 'system' ? 'text.secondary' : 'text.primary'}
-                          sx={{ mt: 0.5 }}
+                          sx={{
+                            mt: 0.5,
+                            fontStyle: message.type === 'whisbot' ? 'italic' : 'normal'
+                          }}
                         >
                           {message.content}
                         </Typography>
@@ -737,6 +908,33 @@ function App() {
                     />
                   </ListItem>
                 ))}
+
+                {/* Bot typing indicator */}
+                {botTyping && chatMode === 'bot' && (
+                  <ListItem alignItems="flex-start">
+                    <Avatar sx={{ mr: 2, bgcolor: 'secondary.main' }}>
+                      ✨
+                    </Avatar>
+                    <ListItemText
+                      primary={
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <Typography variant="subtitle2" component="span">
+                            WhisBot
+                          </Typography>
+                          <Chip label={botVibe} size="small" color="secondary" />
+                        </Box>
+                      }
+                      secondary={
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                          <CircularProgress size={16} />
+                          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+                            typing...
+                          </Typography>
+                        </Box>
+                      }
+                    />
+                  </ListItem>
+                )}
               </List>
             </Box>
 
@@ -750,49 +948,70 @@ function App() {
                   fullWidth
                   multiline
                   maxRows={3}
-                  placeholder="Type your message..."
+                  placeholder={
+                    chatMode === 'bot'
+                      ? `Chat with WhisBot (${botVibe} mode)...`
+                      : "Type your message..."
+                  }
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  disabled={!isConnected}
+                  disabled={chatMode === 'human' && !isConnected}
                   variant="outlined"
                   size="small"
                 />
                 <Button
                   variant="contained"
                   onClick={sendMessage}
-                  disabled={!newMessage.trim() || !isConnected}
+                  disabled={!newMessage.trim() || (chatMode === 'human' && !isConnected)}
                   sx={{ minWidth: 48, height: 40 }}
+                  color={chatMode === 'bot' ? 'secondary' : 'primary'}
                 >
-                  <SendIcon />
+                  {chatMode === 'bot' ? <BotIcon /> : <SendIcon />}
                 </Button>
               </Box>
-              {!isConnected && (
+              {chatMode === 'human' && !isConnected && (
                 <Typography variant="caption" color="error" sx={{ mt: 1, display: 'block' }}>
                   Disconnected from server. Check your connection.
+                </Typography>
+              )}
+              {chatMode === 'bot' && (
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  🤖 Chatting with WhisBot AI in {botVibe} mode
                 </Typography>
               )}
             </Paper>
           </Paper>
 
-          {/* Find Button at the bottom */}
-          <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
-            <Button
-              variant={isScanning ? "contained" : "outlined"}
-              startIcon={<SearchIcon />}
-              onClick={handleFind}
-              sx={{ textTransform: 'none' }}
-              color={isScanning ? "secondary" : "primary"}
-            >
-              {isScanning ? 'Stop Scanning' : 'Find'}
-            </Button>
-          </Box>
+          {/* Find Button - only for human mode */}
+          {chatMode === 'human' && (
+            <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
+              <Button
+                variant={isScanning ? "contained" : "outlined"}
+                startIcon={<SearchIcon />}
+                onClick={handleFind}
+                sx={{ textTransform: 'none' }}
+                color={isScanning ? "secondary" : "primary"}
+              >
+                {isScanning ? 'Stop Scanning' : 'Find'}
+              </Button>
+            </Box>
+          )}
 
-          {/* Connection Status */}
-          {connectedUser && (
+          {/* Connection Status - only for human mode */}
+          {chatMode === 'human' && connectedUser && (
             <Box sx={{ mt: 1, display: 'flex', justifyContent: 'center' }}>
               <Typography variant="body2" color="success.main">
                 Connected with: {connectedUser}
+              </Typography>
+            </Box>
+          )}
+
+          {/* Bot status for bot mode */}
+          {chatMode === 'bot' && (
+            <Box sx={{ mt: 1, display: 'flex', justifyContent: 'center' }}>
+              <Typography variant="body2" color="secondary.main">
+                🤖 WhisBot is ready to chat in {botVibe} mode!
               </Typography>
             </Box>
           )}
@@ -832,8 +1051,8 @@ function App() {
             </DialogActions>
           </Dialog>
 
-          {/* Enhanced Voice Call UI */}
-          {connectedUser && (
+          {/* Enhanced Voice Call UI - only for human mode */}
+          {chatMode === 'human' && connectedUser && (
             <Box sx={{ mt: 2, p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">Voice Call</Typography>
